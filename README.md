@@ -1,4 +1,4 @@
-# QRadar-UI-automation-via-Playwright
+# QRadar-Offense-Auto-Assign
 Automates offense assignment in IBM QRadar using Playwright. Runs on a schedule, assigns offenses to the logged-in analyst.
 
 > ⚠️ Note: This is a personal automation project. It is not affiliated with or endorsed by IBM. Test thoroughly in a non-production QRadar environment before deploying.
