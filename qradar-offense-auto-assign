@@ -1,0 +1,207 @@
+import os
+os.environ['NODE_OPTIONS'] = '--no-deprecation'
+os.environ['NODE_NO_DEPRECATION'] = '1'
+
+import time
+import json
+import asyncio
+from bs4 import BeautifulSoup
+from colorama import init, Fore
+from telegram import Bot
+from telegram.ext import Application
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+import random
+
+init(autoreset=True)
+
+# =========================
+# HTML PARSERS (UNCHANGED)
+# =========================
+
+def parse_offenses():
+    with open("offenses.html", encoding="utf-8") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
+
+    offenses = []
+
+    for row in soup.find_all("tr", class_="datarow"):
+        assigned_icon = row.find("img", src="sem/img/icons/single_user.gif")
+        assigned_to = assigned_icon["tooltip"] if assigned_icon else None
+
+        offenses.append({
+            "offenseId": row.find("td", {"propertyname": "offenseId"}).text.strip(),
+            "domain": row.find("td", {"propertyname": "domain"}).text.strip(),
+            "offenseDescription": row.find("td", {"propertyname": "offenseDescription"}).text.strip(),
+            "sourceIP": row.find("td", {"propertyname": "sourceIP"}).text.strip(),
+            "destinationIP": row.find("td", {"propertyname": "destinationIP"}).text.strip(),
+            "userName": row.find("td", {"propertyname": "userName"}).text.strip(),
+            "eventCount": row.find("td", {"propertyname": "eventCount"}).text.strip().replace(",", ""),
+            "startTime": row.find("td", {"propertyname": "startTime"}).text.strip(),
+            "lastEvent": row.find("td", {"propertyname": "lastEvent"}).text.strip(),
+            "assignedTo": assigned_to
+        })
+
+    with open("offenses.json", "w", encoding="utf-8") as f:
+        json.dump(offenses, f, indent=4)
+
+    print(f"Saved {len(offenses)} offenses")
+
+
+# =========================
+# BROWSER HELPERS
+# =========================
+
+async def get_page_by_title(context, keyword):
+    for p in context.pages:
+        try:
+            if keyword.lower() in (await p.title()).lower():
+                print(Fore.GREEN + f"Switched to: {await p.title()}")
+                return p
+        except:
+            continue
+    return None
+
+
+async def get_offense_frame(page, timeout=30000):
+    # Step 1: wait for PAGE_SEM iframe to exist
+    await page.wait_for_selector("iframe#PAGE_SEM", timeout=timeout)
+
+    # Step 2: wait until rightPane frame is attached
+    end = page.context._loop.time() + (timeout / 1000)
+
+    while page.context._loop.time() < end:
+        for frame in page.frames:
+            if frame.name == "rightPane":
+                return frame
+        await page.wait_for_timeout(250)
+
+    raise RuntimeError("rightPane frame not found (QRadar UI not ready)")
+
+async def get_right_pane(page, timeout=30000):
+    await page.wait_for_selector("iframe#PAGE_SEM", timeout=timeout)
+
+    end = page.context._loop.time() + (timeout / 1000)
+    while page.context._loop.time() < end:
+        for frame in page.frames:
+            if frame.name == "rightPane":
+                return frame
+        await page.wait_for_timeout(200)
+
+    raise RuntimeError("rightPane frame not found")
+
+
+# =========================
+# ACTIONS
+# =========================
+
+async def offenses(context):
+    page = await get_page_by_title(context, "offense")
+    frame = await get_offense_frame(page)
+
+    await frame.locator("#_REFRESH_").click()
+    await page.wait_for_timeout(5000)
+
+    with open("offenses.html", "w", encoding="utf-8") as f:
+        f.write(await frame.content())
+
+    parse_offenses()
+
+
+async def assign_offense(context):
+    # 1. Switch to the tab containing "Offense" in the title
+    pages = context.pages
+    page = None
+    for p in pages:
+        title = await p.title()
+        if "Offense Manager" in title:
+            page = p
+            break
+    if not page:
+        print("No 'Offense Manager' tab found")
+        return
+    print(f"Switched to tab: {await page.title()}")
+
+    # 2. Load offense data
+    with open("offenses.json", "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # 3. Switch to correct iframe(s)
+    page_sem_frame = page.frame(name="PAGE_SEM")
+    if not page_sem_frame:
+        print("PAGE_SEM frame not found")
+        return
+
+    # Find child frame named "rightPane" within PAGE_SEM
+    right_pane_frame = None
+    for frame in page_sem_frame.child_frames:
+        if frame.name == "rightPane":
+            right_pane_frame = frame
+            break
+    if not right_pane_frame:
+        print("rightPane frame not found")
+        return
+
+    # 4. Bulk-select unassigned offenses
+    first_selected = True
+    for item in data:
+        if item.get("assignedTo") is None:
+            off_id = item.get("offenseId")
+            if not off_id:
+                continue
+
+            row = right_pane_frame.locator(f'[id="{off_id}"]')
+            await row.scroll_into_view_if_needed()
+            if first_selected:
+                await row.click()
+                first_selected = False
+            else:
+                await row.click(modifiers=["Control"])
+
+    if first_selected:
+        print("No unassigned offenses found — bulk assign skipped.")
+        return
+
+    # Actions → Assign
+    frame = [f for f in page.frames if f.name == "rightPane"][0]
+    await frame.locator("span:text-is('Actions')").click()
+
+    async with page.expect_popup() as popup_info:
+        await frame.locator("span:text-is('Assign')").click()
+
+    assign_page = await popup_info.value
+    await assign_page.wait_for_load_state()
+
+    with open('qradar-usernames.txt', 'r') as f:
+        usernames = f.read().splitlines()
+    
+    assign_name = random.choice(usernames)
+
+    user_input = assign_page.locator("#userSelect")
+    await user_input.wait_for(state="visible", timeout=20000)
+    await user_input.fill(assign_name)
+    await user_input.press("Enter")
+
+    save_btn = assign_page.locator(
+        "input[value='Save'], span:text-is('Save')"
+    )
+    await save_btn.wait_for(state="visible", timeout=20000)
+    await save_btn.click(force=True)
+
+    print("Offenses assigned successfully.")
+
+
+# =========================
+# MAIN
+# =========================
+
+async def main():
+    async with async_playwright() as p:
+        browser = await p.chromium.connect_over_cdp("http://localhost:9222")
+        context = browser.contexts[0]
+
+
+        await offenses(context)
+        await assign_offense(context)
+
+if __name__ == "__main__":
+    asyncio.run(main())
