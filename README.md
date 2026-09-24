@@ -17,8 +17,8 @@ The script does not launch a browser or handle login. You must have a Chromium s
 
 ## Installation
 ```
-git clone https://github.com/Kick101/QRadar-UI-automation-via-Playwright.git
-cd QRadar-UI-automation-via-Playwright
+git clone https://github.com/Kick101/QRadar-Offense-Auto-Assign.git
+cd QRadar-Offense-Auto-Assign
 
 python -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
